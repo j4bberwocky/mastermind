@@ -1,0 +1,18 @@
+services:
+  mastermind:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mastermind:latest
+    container_name: mastermind
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
