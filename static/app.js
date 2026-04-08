@@ -1,6 +1,8 @@
 /* ── State ─────────────────────────────────────────────────────────────── */
 let gameId = null;
 let currentGuess = [0, 0, 0, 0]; // 0 = empty
+let isStartingGame = false;
+let isSubmittingGuess = false;
 const CODE_LENGTH = 4;
 const NUM_COLORS = 6;
 const MAX_ATTEMPTS = 10;
@@ -22,6 +24,33 @@ function showMessage(text, type = '') {
   show('message-banner');
 }
 
+async function readErrorMessage(res, fallback) {
+  try {
+    const data = await res.json();
+    return data.error || fallback;
+  } catch {
+    try {
+      const text = await res.text();
+      return text || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+}
+
+function setNewGameDisabled(disabled) {
+  $('btn-new-game').disabled = disabled;
+}
+
+function setGuessControlsDisabled(disabled) {
+  const pegButtons = $('guess-input').querySelectorAll('button.peg');
+  pegButtons.forEach(btn => {
+    btn.disabled = disabled;
+  });
+
+  $('btn-submit').disabled = disabled;
+}
+
 function pegHtml(color, size = '') {
   const cls = color > 0 ? `peg peg-${color}` : 'peg peg-empty';
   const sizeAttr = size ? ` style="width:${size};height:${size};"` : '';
@@ -30,7 +59,7 @@ function pegHtml(color, size = '') {
 
 /* ── Cycle peg color on click ──────────────────────────────────────────── */
 function cyclePeg(pos) {
-  if (!gameId) return;
+  if (!gameId || isSubmittingGuess) return;
   currentGuess[pos] = (currentGuess[pos] % NUM_COLORS) + 1;
   updateGuessInput();
 }
@@ -46,13 +75,22 @@ function updateGuessInput() {
 
 /* ── Start a new game ──────────────────────────────────────────────────── */
 $('btn-new-game').addEventListener('click', async () => {
+  if (isStartingGame) return;
+
   try {
+    isStartingGame = true;
+    setNewGameDisabled(true);
+
     const res = await fetch('/api/game', { method: 'POST' });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, 'Unable to start a new game.'));
+    }
+
     const data = await res.json();
 
     gameId = data.game_id;
     currentGuess = [0, 0, 0, 0];
+    isSubmittingGuess = false;
 
     // Reset UI
     $('board-body').innerHTML = '';
@@ -65,6 +103,7 @@ $('btn-new-game').addEventListener('click', async () => {
     $('info-status').className = 'badge badge-inprogress';
 
     updateGuessInput();
+  setGuessControlsDisabled(false);
     show('game-info');
     show('legend');
     show('guess-section');
@@ -72,12 +111,15 @@ $('btn-new-game').addEventListener('click', async () => {
     showMessage(data.message);
   } catch (err) {
     showMessage('Failed to start game: ' + err.message, 'error');
+  } finally {
+    isStartingGame = false;
+    setNewGameDisabled(false);
   }
 });
 
 /* ── Submit a guess ────────────────────────────────────────────────────── */
 async function submitGuess() {
-  if (!gameId) return;
+  if (!gameId || isSubmittingGuess) return;
 
   if (currentGuess.includes(0)) {
     showMessage('Please fill all 4 positions before submitting.', 'error');
@@ -85,20 +127,23 @@ async function submitGuess() {
   }
 
   try {
+    isSubmittingGuess = true;
+    setGuessControlsDisabled(true);
+    const submittedGuess = [...currentGuess];
+
     const res = await fetch(`/api/game/${gameId}/guess`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ guess: currentGuess }),
+      body: JSON.stringify({ guess: submittedGuess }),
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      showMessage(err.error || 'Error submitting guess', 'error');
+      showMessage(await readErrorMessage(res, 'Error submitting guess'), 'error');
       return;
     }
 
     const data = await res.json();
-    appendTurnToBoard(data.attempt, currentGuess, data.blacks, data.whites);
+    appendTurnToBoard(data.attempt, submittedGuess, data.blacks, data.whites);
     $('info-attempts').textContent = `Attempts: ${data.attempt} / ${MAX_ATTEMPTS}`;
 
     if (data.status === 'won' || data.status === 'lost') {
@@ -111,6 +156,13 @@ async function submitGuess() {
     }
   } catch (err) {
     showMessage('Network error: ' + err.message, 'error');
+  } finally {
+    isSubmittingGuess = false;
+    if ($('guess-section').classList.contains('hidden')) {
+      setGuessControlsDisabled(true);
+    } else {
+      setGuessControlsDisabled(false);
+    }
   }
 }
 
@@ -165,8 +217,7 @@ async function analyzeGame() {
   try {
     const res = await fetch(`/api/game/${gameId}/analyze`, { method: 'POST' });
     if (!res.ok) {
-      const err = await res.json();
-      showMessage(err.error || 'Analysis failed', 'error');
+      showMessage(await readErrorMessage(res, 'Analysis failed'), 'error');
       return;
     }
     const analysis = await res.json();

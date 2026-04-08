@@ -26,10 +26,27 @@ async fn main() {
     let app = build_router(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::AddrInUse {
+                tracing::error!(
+                    "Could not start server on http://{}: address already in use. Stop the existing process or free port 8080 and try again.",
+                    addr
+                );
+            } else {
+                tracing::error!("Could not bind server to http://{}: {}", addr, err);
+            }
+            std::process::exit(1);
+        }
+    };
+
     tracing::info!("Mastermind server listening on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!("Server error: {}", err);
+        std::process::exit(1);
+    }
 }
 
 /// Builds the application router (extracted so tests can reuse it).
