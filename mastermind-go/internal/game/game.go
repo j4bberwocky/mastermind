@@ -18,10 +18,10 @@ const (
 
 // Sentinel errors for game operations.
 var (
-	ErrGameOver         = errors.New("Game is already over")
+	ErrGameOver         = errors.New("game is already over")
 	ErrInvalidPeg       = errors.New("invalid peg value")
 	ErrInvalidCodeLength = errors.New("invalid code length")
-	ErrNotFound         = errors.New("Game not found")
+	ErrNotFound         = errors.New("game not found")
 )
 
 // Peg represents a single color peg (1–6).
@@ -30,7 +30,7 @@ type Peg uint8
 // NewPeg creates a Peg after validating the value is in [1, NumColors].
 func NewPeg(v uint8) (Peg, error) {
 	if v < 1 || v > NumColors {
-		return 0, fmt.Errorf("Invalid peg value: %d (must be 1–%d): %w", v, NumColors, ErrInvalidPeg)
+		return 0, fmt.Errorf("invalid peg value: %d (must be 1–%d): %w", v, NumColors, ErrInvalidPeg)
 	}
 	return Peg(v), nil
 }
@@ -205,7 +205,7 @@ func Evaluate(secret, guess Code) Feedback {
 // ParseCode validates a slice of uint8 values and converts them into a Code.
 func ParseCode(values []uint8) (Code, error) {
 	if len(values) != CodeLength {
-		return Code{}, fmt.Errorf("Code must have exactly %d pegs, got %d: %w", CodeLength, len(values), ErrInvalidCodeLength)
+		return Code{}, fmt.Errorf("code must have exactly %d pegs, got %d: %w", CodeLength, len(values), ErrInvalidCodeLength)
 	}
 	var code Code
 	for i, v := range values {
