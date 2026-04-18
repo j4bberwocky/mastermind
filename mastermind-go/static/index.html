@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mastermind</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1>🔐 Mastermind</h1>
+      <p class="subtitle">Crack the secret 4-color code in 10 attempts!</p>
+    </header>
+
+    <!-- Game Controls -->
+    <section class="controls" id="controls">
+      <button id="btn-new-game" class="btn btn-primary">New Game</button>
+      <div id="game-info" class="game-info hidden">
+        <span id="info-attempts">Attempts: 0 / 10</span>
+        <span id="info-status" class="badge badge-inprogress">In Progress</span>
+      </div>
+    </section>
+
+    <!-- Color Legend -->
+    <section class="legend hidden" id="legend">
+      <h3>Color Key</h3>
+      <div class="legend-row">
+        <span class="peg peg-1"></span><span class="legend-label">1 – Red</span>
+        <span class="peg peg-2"></span><span class="legend-label">2 – Orange</span>
+        <span class="peg peg-3"></span><span class="legend-label">3 – Yellow</span>
+        <span class="peg peg-4"></span><span class="legend-label">4 – Green</span>
+        <span class="peg peg-5"></span><span class="legend-label">5 – Blue</span>
+        <span class="peg peg-6"></span><span class="legend-label">6 – Purple</span>
+      </div>
+    </section>
+
+    <!-- Guess Input -->
+    <section class="guess-section hidden" id="guess-section">
+      <h3>Your Guess</h3>
+      <div class="guess-row" id="guess-input">
+        <button class="peg peg-empty" data-pos="0" onclick="cyclePeg(0)"></button>
+        <button class="peg peg-empty" data-pos="1" onclick="cyclePeg(1)"></button>
+        <button class="peg peg-empty" data-pos="2" onclick="cyclePeg(2)"></button>
+        <button class="peg peg-empty" data-pos="3" onclick="cyclePeg(3)"></button>
+        <button id="btn-submit" class="btn btn-accent" onclick="submitGuess()">Submit</button>
+      </div>
+      <p class="hint">Click the circles to cycle through colors, then submit your guess.</p>
+    </section>
+
+    <!-- Message Banner -->
+    <div id="message-banner" class="message-banner hidden"></div>
+
+    <!-- Board (history of guesses) -->
+    <section class="board-section hidden" id="board-section">
+      <h3>Guess History</h3>
+      <table class="board">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th colspan="4">Guess</th>
+            <th>⚫ Black</th>
+            <th>⚪ White</th>
+          </tr>
+        </thead>
+        <tbody id="board-body"></tbody>
+      </table>
+    </section>
+
+    <!-- End-of-game panel -->
+    <section class="end-section hidden" id="end-section">
+      <div class="end-card" id="end-card">
+        <h2 id="end-title"></h2>
+        <p>The secret was:</p>
+        <div class="guess-row" id="secret-display"></div>
+        <div class="end-actions">
+          <button class="btn btn-primary" id="btn-analyze" onclick="analyzeGame()">
+            🔍 Analyze My Game
+          </button>
+          <button class="btn btn-secondary" onclick="location.reload()">Play Again</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Analysis Panel -->
+    <section class="analysis-section hidden" id="analysis-section">
+      <h3>📊 Game Analysis</h3>
+      <div id="analysis-summary" class="analysis-summary"></div>
+      <div id="analysis-turns"></div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
