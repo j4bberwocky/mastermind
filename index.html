@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mastermind — A Game of Deduction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="application/json" id="tweaks-defaults">/*EDITMODE-BEGIN*/{
+    "theme": "paper",
+    "codeLength": 4,
+    "maxAttempts": 10,
+    "allowDuplicates": true,
+    "numColors": 6
+  }/*EDITMODE-END*/</script>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" data-presets="env,react">
+/* ═════════════════════════════════════════════════════════════════════
+   MASTERMIND — editorial typographic edition
+   Single-page React app with hash-based router and pluggable backend.
+   ═════════════════════════════════════════════════════════════════════ */
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+// Touch-only device? HTML5 drag-and-drop doesn't work on iOS/Android, and a
+// `draggable` element suppresses `click` events on iPad Safari — so on touch
+// devices we disable `draggable` and lean on tap-to-place.
+const IS_TOUCH = (() => {
+  try { return !window.matchMedia("(hover: hover) and (pointer: fine)").matches; }
+  catch { return "ontouchstart" in window; }
+})();
+
+// ─────────────────────────────────────────────────────────────
+// Color palette (matches CSS variables --c1..--c6)
+// ─────────────────────────────────────────────────────────────
+const COLOR_DEFS = [
+  { id: 0, name: "Crimson", num: "I"   },
+  { id: 1, name: "Mustard", num: "II"  },
+  { id: 2, name: "Sage",    num: "III" },
+  { id: 3, name: "Cobalt",  num: "IV"  },
+  { id: 4, name: "Plum",    num: "V"   },
+  { id: 5, name: "Ink",     num: "VI"  },
+];
+
+const DEFAULT_SETTINGS = { codeLength: 4, numColors: 6, allowDuplicates: true, maxAttempts: 10 };
+
+// ─────────────────────────────────────────────────────────────
+// Game logic
+// ─────────────────────────────────────────────────────────────
+function generateCode(length, numColors, allowDup) {
+  const palette = Array.from({ length: numColors }, (_, i) => i);
+  if (allowDup) {
+    return Array.from({ length }, () => palette[Math.floor(Math.random() * palette.length)]);
+  }
+  const arr = [...palette];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.slice(0, length);
+}
+
+function evaluate(guess, code) {
+  let blacks = 0;
+  const codeRem = [], guessRem = [];
+  for (let i = 0; i < code.length; i++) {
+    if (guess[i] === code[i]) blacks++;
+    else { codeRem.push(code[i]); guessRem.push(guess[i]); }
+  }
+  let whites = 0;
+  for (const g of guessRem) {
+    const idx = codeRem.indexOf(g);
+    if (idx >= 0) { whites++; codeRem.splice(idx, 1); }
+  }
+  return { blacks, whites };
+}
+
+// ─────────────────────────────────────────────────────────────
+// API client — tries /api/* first, falls back to localStorage mock
+// ─────────────────────────────────────────────────────────────
+const api = (() => {
+  const KEY = "mastermind:problems";
+  const apiBase = window.location.protocol === "file:" ? null : "/api";
+
+  let detected = "pending"; // "pending" | "remote" | "mock"
+  const listeners = new Set();
+  function setMode(m) {
+    if (m === detected) return;
+    detected = m;
+    listeners.forEach(l => l(m));
+  }
+
+  function loadAll() {
+    try { return JSON.parse(localStorage.getItem(KEY) || "{}"); }
+    catch { return {}; }
+  }
+  function saveAll(d) { localStorage.setItem(KEY, JSON.stringify(d)); }
+
+  function genId() {
+    const chars = "23456789abcdefghjkmnpqrstuvwxyz";
+    return Array.from({ length: 7 },
+      () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  }
+  function publicView(p) { const { code, ...rest } = p; return rest; }
+
+  // Cache the "is the backend reachable?" decision so we don't pay the timeout
+  // on every call once we've answered the question.
+  let probe = null; // null | Promise<boolean> | boolean
+  function probeBackend() {
+    if (probe !== null && typeof probe !== "object") return Promise.resolve(probe);
+    if (probe instanceof Promise) return probe;
+    probe = (async () => {
+      try {
+        const ac = new AbortController();
+        const to = setTimeout(() => ac.abort(), 1200);
+        const r = await fetch(apiBase + "/problems", { signal: ac.signal });
+        clearTimeout(to);
+        // We need /api/problems to be a real JSON endpoint. Sniff content-type.
+        const ct = r.headers.get("content-type") || "";
+        const ok = r.ok && ct.includes("application/json");
+        probe = ok;
+        setMode(ok ? "remote" : "mock");
+        return ok;
+      } catch {
+        probe = false;
+        setMode("mock");
+        return false;
+      }
+    })();
+    return probe;
+  }
+
+  async function tryFetch(path, init) {
+    if (!apiBase) { setMode("mock"); return null; }
+    const isRemote = await probeBackend();
+    if (!isRemote) return null;
+    try {
+      const r = await fetch(apiBase + path, init);
+      return r;
+    } catch {
+      // Backend went away mid-session. Demote to mock.
+      probe = false;
+      setMode("mock");
+      return null;
+    }
+  }
+
+  return {
+    get mode() { return detected; },
+    onChange(l) { listeners.add(l); return () => listeners.delete(l); },
+
+    async createProblem(payload) {
+      const r = await tryFetch("/problems", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (r && r.ok) return r.json();
+      if (r) throw new Error((await r.text()) || "Bad request");
+
+      // Mock fallback
+      const id = genId();
+      const initialFeedback = (payload.initialGuesses || []).map(g => evaluate(g, payload.code));
+      const problem = {
+        id,
+        code: payload.code,
+        settings: payload.settings,
+        initialGuesses: payload.initialGuesses || [],
+        initialFeedback,
+        title: payload.title || null,
+        createdAt: new Date().toISOString(),
+      };
+      const all = loadAll(); all[id] = problem; saveAll(all);
+      return publicView(problem);
+    },
+
+    async getProblem(id) {
+      const r = await tryFetch("/problems/" + encodeURIComponent(id));
+      if (r && r.ok) return r.json();
+      if (r && r.status === 404) { const e = new Error("not_found"); e.code = 404; throw e; }
+      if (r) throw new Error((await r.text()) || "Request failed");
+
+      const all = loadAll();
+      const p = all[id];
+      if (!p) { const e = new Error("not_found"); e.code = 404; throw e; }
+      return publicView(p);
+    },
+
+    async checkGuess(id, guess) {
+      const r = await tryFetch("/problems/" + encodeURIComponent(id) + "/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guess }),
+      });
+      if (r && r.ok) return r.json();
+      if (r) throw new Error((await r.text()) || "Request failed");
+
+      const all = loadAll();
+      const p = all[id];
+      if (!p) { const e = new Error("not_found"); e.code = 404; throw e; }
+      return evaluate(guess, p.code);
+    },
+
+    async revealCode(id) {
+      const r = await tryFetch("/problems/" + encodeURIComponent(id) + "/code");
+      if (r && r.ok) return r.json();
+      if (r) throw new Error((await r.text()) || "Request failed");
+
+      const all = loadAll();
+      const p = all[id];
+      if (!p) { const e = new Error("not_found"); e.code = 404; throw e; }
+      return { code: p.code };
+    },
+
+    async listProblems() {
+      const r = await tryFetch("/problems");
+      if (r && r.ok) return r.json();
+      if (r) throw new Error((await r.text()) || "Request failed");
+
+      const all = loadAll();
+      const problems = Object.values(all).map(publicView);
+      problems.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+      return { problems };
+    },
+  };
+})();
+
+// ─────────────────────────────────────────────────────────────
+// Hash router
+// ─────────────────────────────────────────────────────────────
+function parseHash(h) {
+  if (!h || h === "#" || h === "#/") return { name: "home" };
+  if (h === "#/create") return { name: "create" };
+  if (h === "#/browse") return { name: "browse" };
+  const m = h.match(/^#\/play\/([A-Za-z0-9_-]+)$/);
+  if (m) return { name: "play", id: m[1] };
+  return { name: "notfound" };
+}
+function useRoute() {
+  const [hash, setHash] = useState(window.location.hash || "#/");
+  useEffect(() => {
+    const onHash = () => {
+      setHash(window.location.hash || "#/");
+      window.scrollTo({ top: 0, behavior: "instant" });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return useMemo(() => parseHash(hash), [hash]);
+}
+function navigate(hash) {
+  if (window.location.hash === hash) {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } else {
+    window.location.hash = hash;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tweaks
+// ─────────────────────────────────────────────────────────────
+function useTweaks() {
+  const defaultJson = document.getElementById("tweaks-defaults").textContent;
+  const parsed = JSON.parse(defaultJson.replace(/\/\*EDITMODE-(BEGIN|END)\*\//g, ""));
+  const [state, setState] = useState(parsed);
+  const update = useCallback((patch) => {
+    setState((s) => {
+      const next = { ...s, ...patch };
+      try { window.parent.postMessage({ type: "__edit_mode_set_keys", edits: patch }, "*"); } catch {}
+      return next;
+    });
+  }, []);
+  return [state, update];
+}
+
+function TweaksPanel({ tweaks, setTweak, open, onClose }) {
+  return (
+    <aside className={`tweaks ${open ? "open" : ""}`} aria-hidden={!open}>
+      <button className="close" onClick={onClose} aria-label="Close tweaks">×</button>
+      <h3>Tweaks</h3>
+
+      <div className="tweak-row">
+        <span className="lbl">Theme</span>
+        <div className="seg">
+          {["paper", "noir"].map((v) => (
+            <button key={v} className={tweaks.theme === v ? "on" : ""} onClick={() => setTweak({ theme: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="tweak-row">
+        <span className="lbl">Default code length</span>
+        <div className="seg">
+          {[4, 5, 6].map((v) => (
+            <button key={v} className={tweaks.codeLength === v ? "on" : ""} onClick={() => setTweak({ codeLength: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="tweak-row">
+        <span className="lbl">Default attempts</span>
+        <div className="seg">
+          {[8, 10, 12].map((v) => (
+            <button key={v} className={tweaks.maxAttempts === v ? "on" : ""} onClick={() => setTweak({ maxAttempts: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="tweak-row">
+        <span className="lbl">Default duplicates</span>
+        <div className="seg">
+          <button className={tweaks.allowDuplicates ? "on" : ""} onClick={() => setTweak({ allowDuplicates: true })}>allowed</button>
+          <button className={!tweaks.allowDuplicates ? "on" : ""} onClick={() => setTweak({ allowDuplicates: false })}>unique</button>
+        </div>
+      </div>
+
+      <div className="tweak-row" style={{ marginTop: 6 }}>
+        <span className="lbl" style={{ fontSize: 9 }}>Applied as defaults when starting a new game or composing.</span>
+      </div>
+    </aside>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Building blocks
+// ─────────────────────────────────────────────────────────────
+function Peg({ colorId, className = "", style = {}, ...rest }) {
+  if (colorId == null) return null;
+  return (
+    <span
+      className={`peg ${className}`}
+      style={{ ...style, "--c": `var(--c${colorId + 1})` }}
+      {...rest}
+    />
+  );
+}
+
+function FeedbackPegs({ blacks, whites, total }) {
+  const items = [];
+  for (let i = 0; i < blacks; i++) items.push("black");
+  for (let i = 0; i < whites; i++) items.push("white");
+  while (items.length < total) items.push("empty");
+  return (
+    <div className={`feedback size-${total}`} aria-label={`${blacks} exact, ${whites} present`}>
+      {items.map((k, i) => (
+        <span key={i} className={`fb ${k === "empty" ? "" : k}`} />
+      ))}
+    </div>
+  );
+}
+
+/* A slot that can accept drag-drop or click-to-place */
+function Slot({ colorId, active, onDrop, onClick, onPegDragStart, onPegDragEnd, hiddenPeg }) {
+  const [over, setOver] = useState(false);
+  const empty = colorId == null;
+  return (
+    <div
+      className={`slot ${empty ? "empty" : ""} ${active ? "active" : ""} ${over ? "drag-over" : ""} ${hiddenPeg ? "hidden-peg" : ""}`}
+      onDragOver={(e) => {
+        if (!active) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!over) setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        if (!active) return;
+        e.preventDefault(); setOver(false);
+        try {
+          const data = JSON.parse(e.dataTransfer.getData("application/json") || "{}");
+          onDrop && onDrop(data);
+        } catch {}
+      }}
+      onClick={() => active && onClick && onClick()}
+      role="button"
+      tabIndex={active ? 0 : -1}
+    >
+      {!empty && !hiddenPeg && (
+        <Peg
+          colorId={colorId}
+          className={IS_TOUCH ? "" : "draggable"}
+          draggable={!!active && !IS_TOUCH}
+          onDragStart={(e) => {
+            if (!active || IS_TOUCH) return;
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("application/json", JSON.stringify({ from: "slot", color: colorId }));
+            onPegDragStart && onPegDragStart();
+          }}
+          onDragEnd={onPegDragEnd}
+        />
+      )}
+      {hiddenPeg && <span className="peg" />}
+    </div>
+  );
+}
+
+function BoardRow({ index, state, row, blacks, whites, codeLength,
+                    onDropToSlot, onClickSlot, onPegDragStart, onPegDragEnd, slotDragData }) {
+  const num = String(index + 1).padStart(2, "0");
+  return (
+    <div className={`row ${state}`}>
+      <div className="row-num">{num}</div>
+      <div className="slots">
+        {Array.from({ length: codeLength }).map((_, i) => (
+          <Slot
+            key={i}
+            colorId={row[i]}
+            active={state === "active"}
+            onDrop={(data) => onDropToSlot && onDropToSlot(i, data)}
+            onClick={() => onClickSlot && onClickSlot(i)}
+            onPegDragStart={() => onPegDragStart && onPegDragStart(i)}
+            onPegDragEnd={onPegDragEnd}
+          />
+        ))}
+      </div>
+      <FeedbackPegs blacks={blacks} whites={whites} total={codeLength} />
+    </div>
+  );
+}
+
+function Palette({ numColors, onPick, selected, disabled, compact, onDragStart, onDragEnd }) {
+  return (
+    <div className="card">
+      <div className="section-label">Palette</div>
+      <div className={`palette-grid ${compact ? "compact" : ""}`}>
+        {COLOR_DEFS.slice(0, numColors).map((c) => (
+          <div
+            key={c.id}
+            className="palette-cell"
+            draggable={!disabled && !IS_TOUCH}
+            onDragStart={(e) => {
+              if (disabled || IS_TOUCH) return;
+              e.dataTransfer.effectAllowed = "copy";
+              e.dataTransfer.setData("application/json", JSON.stringify({ from: "palette", color: c.id }));
+              onDragStart && onDragStart(c.id);
+            }}
+            onDragEnd={onDragEnd}
+            onClick={() => !disabled && onPick && onPick(c.id)}
+            tabIndex={0} role="button" aria-label={`Color ${c.name}`}
+          >
+            <Peg colorId={c.id} className={selected === c.id ? "selected" : ""} />
+            <span className="num">{c.num}</span>
+            <span className="label">{c.name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Core Game component — used by HomePage AND PlayPage
+// settings        : game settings
+// initialGuesses  : [{ row:number[], blacks, whites }] (pre-played, locked)
+// checkGuess      : async (guess) => { blacks, whites }
+// revealCode      : async () => { code }
+// onNewGame       : optional, hides "New game" button if absent
+// ─────────────────────────────────────────────────────────────
+function Game({ settings, initialGuesses, checkGuess, revealCode, onNewGame, title, subtitle }) {
+  const [guesses, setGuesses] = useState(initialGuesses || []);
+  const [current, setCurrent] = useState(() => Array(settings.codeLength).fill(null));
+  const [status, setStatus] = useState("playing");
+  const [selectedColor, setSelectedColor] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [revealedCode, setRevealedCode] = useState(null);
+
+  // Reset when settings/initialGuesses change (e.g. navigation between problems)
+  useEffect(() => {
+    setGuesses(initialGuesses || []);
+    setCurrent(Array(settings.codeLength).fill(null));
+    setStatus("playing");
+    setRevealedCode(null);
+    setError(null);
+  }, [settings.codeLength, settings.maxAttempts, initialGuesses]);
+
+  const placePeg = (slotIdx, color) => {
+    if (status !== "playing") return;
+    setCurrent((cur) => { const next = [...cur]; next[slotIdx] = color; return next; });
+  };
+
+  const handleDropToSlot = (slotIdx, data) => {
+    if (!data) return;
+    if (data.from === "palette") placePeg(slotIdx, data.color);
+    else if (data.from === "slot" && typeof data.color === "number") {
+      setCurrent((cur) => {
+        const next = [...cur];
+        // Move/swap: place the dragged color here; remove any duplicate elsewhere only if it's coming from a slot
+        // Simple model: just replace the target slot value
+        next[slotIdx] = data.color;
+        return next;
+      });
+    }
+  };
+
+  const handleSlotClick = (slotIdx) => {
+    if (status !== "playing") return;
+    if (selectedColor != null) {
+      placePeg(slotIdx, selectedColor);
+      setSelectedColor(null);
+      return;
+    }
+    if (current[slotIdx] != null) {
+      setCurrent((cur) => { const next = [...cur]; next[slotIdx] = null; return next; });
+    }
+  };
+
+  const handlePalettePick = (colorId) => {
+    if (status !== "playing") return;
+    if (selectedColor === colorId) { setSelectedColor(null); return; }
+    if (selectedColor != null) { setSelectedColor(colorId); return; }
+    const firstEmpty = current.findIndex((x) => x == null);
+    if (firstEmpty >= 0) placePeg(firstEmpty, colorId);
+    else setSelectedColor(colorId);
+  };
+
+  const remainingAttempts = settings.maxAttempts - guesses.length;
+  const canSubmit = current.every((c) => c != null) && status === "playing" && !submitting;
+
+  async function submit() {
+    if (!canSubmit) return;
+    setSubmitting(true); setError(null);
+    try {
+      const guess = [...current];
+      const { blacks, whites } = await checkGuess(guess);
+      const newGuesses = [...guesses, { row: guess, blacks, whites }];
+      setGuesses(newGuesses);
+      setCurrent(Array(settings.codeLength).fill(null));
+      setSelectedColor(null);
+      if (blacks === settings.codeLength) {
+        setStatus("won");
+        const r = await revealCode().catch(() => ({ code: guess }));
+        setRevealedCode(r.code);
+      } else if (newGuesses.length >= settings.maxAttempts) {
+        setStatus("lost");
+        const r = await revealCode().catch(() => null);
+        if (r) setRevealedCode(r.code);
+      }
+    } catch (e) {
+      setError(e.message || "Request failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+      if (e.key === "Enter") submit();
+      if (e.key === "Backspace") {
+        setCurrent((cur) => {
+          const next = [...cur];
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i] != null) { next[i] = null; break; }
+          }
+          return next;
+        });
+      }
+      const n = parseInt(e.key, 10);
+      if (!isNaN(n) && n >= 1 && n <= settings.numColors) {
+        const firstEmpty = current.findIndex((x) => x == null);
+        if (firstEmpty >= 0) placePeg(firstEmpty, n - 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // Compose rows for display
+  const rows = [];
+  for (let i = 0; i < settings.maxAttempts; i++) {
+    if (i < (initialGuesses?.length || 0)) {
+      const g = initialGuesses[i];
+      rows.push({ state: "played initial", row: g.row, blacks: g.blacks, whites: g.whites });
+    } else if (i < guesses.length) {
+      const g = guesses[i];
+      rows.push({ state: "played", row: g.row, blacks: g.blacks, whites: g.whites });
+    } else if (i === guesses.length && status === "playing") {
+      rows.push({ state: "active", row: current, blacks: 0, whites: 0 });
+    } else {
+      rows.push({ state: "empty", row: Array(settings.codeLength).fill(null), blacks: 0, whites: 0 });
+    }
+  }
+
+  const turn = Math.min(guesses.length + 1, settings.maxAttempts);
+
+  return (
+    <div className="main">
+      <section>
+        <div className="section-label">{title || "Board"}</div>
+        {subtitle && <p className="howto" style={{ marginTop: -6, marginBottom: 14 }}>{subtitle}</p>}
+        <div className="board">
+          {rows.map((r, i) => (
+            <BoardRow
+              key={i}
+              index={i}
+              state={r.state}
+              row={r.row}
+              blacks={r.blacks}
+              whites={r.whites}
+              codeLength={settings.codeLength}
+              onDropToSlot={handleDropToSlot}
+              onClickSlot={handleSlotClick}
+            />
+          ))}
+        </div>
+
+        {status !== "playing" && (
+          <div className="verdict">
+            <div>
+              <h2>{status === "won" ? "Solved." : "Defeated."}</h2>
+              <p>{status === "won"
+                ? `Cracked in ${guesses.length} ${guesses.length === 1 ? "attempt" : "attempts"}.`
+                : "The cipher held."}</p>
+            </div>
+            {revealedCode && (
+              <div className="reveal">
+                <span className="label">The code</span>
+                <div className="pegs">
+                  {revealedCode.map((c, i) => <Peg key={i} colorId={c} />)}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {error && (
+          <div className="notice" style={{ marginTop: 18, padding: "18px 0" }}>
+            <p style={{ color: "var(--ink)" }}>API error: {error}</p>
+          </div>
+        )}
+      </section>
+
+      <aside className="side">
+        <Palette
+          numColors={settings.numColors}
+          onDragStart={(c) => setSelectedColor(c)}
+          onPick={handlePalettePick}
+          selected={selectedColor}
+          disabled={status !== "playing"}
+        />
+
+        <div className="card">
+          <div className="section-label">Status</div>
+          <div className="meta">
+            <span>Turn</span>
+            <span>
+              <span className="turn">{String(turn).padStart(2, "0")}</span>
+              <span className="of"> / {String(settings.maxAttempts).padStart(2, "0")}</span>
+            </span>
+          </div>
+
+          <div className="actions">
+            <button className="btn btn-primary" disabled={!canSubmit} onClick={submit}>
+              <span>{submitting ? "Checking…" : "Submit Guess"}</span>
+              <span className="arrow">→</span>
+            </button>
+            {onNewGame && (
+              <button className="btn btn-ghost" onClick={onNewGame}>
+                <span>New Game</span>
+                <span className="arrow">↻</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="section-label">How to play</div>
+          <div className="howto">
+            {IS_TOUCH ? (
+              <>
+                <strong>Tap</strong> a colour to drop it on the next empty slot. <strong>Tap</strong> a placed peg to remove it. To replace a peg, tap the new colour then tap the slot.
+              </>
+            ) : (
+              <>
+                <strong>Drag</strong> a colour onto the active row. <strong>Click</strong> a placed peg to remove it. Press <strong>Enter</strong> to submit, <strong>1–{settings.numColors}</strong> to place, <strong>⌫</strong> to undo.
+              </>
+            )}
+            <div className="legend">
+              <span className="lg"><span className="fb black"></span> right colour, right place</span>
+              <span className="lg"><span className="fb white"></span> right colour, wrong place</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// HOME — random local game (no backend needed)
+// ─────────────────────────────────────────────────────────────
+function HomePage({ tweaks }) {
+  const [settings] = useState({
+    codeLength: tweaks.codeLength, numColors: tweaks.numColors,
+    allowDuplicates: tweaks.allowDuplicates, maxAttempts: tweaks.maxAttempts,
+  });
+  const [codeNonce, setCodeNonce] = useState(0);
+  const code = useMemo(
+    () => generateCode(settings.codeLength, settings.numColors, settings.allowDuplicates),
+    [settings, codeNonce]
+  );
+  return (
+    <Game
+      settings={settings}
+      initialGuesses={[]}
+      checkGuess={async (g) => evaluate(g, code)}
+      revealCode={async () => ({ code })}
+      onNewGame={() => setCodeNonce(n => n + 1)}
+      title="Board · The Daily Puzzle"
+    />
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// CREATE — compose a problem
+// ─────────────────────────────────────────────────────────────
+function CodeBuilder({ code, setCode, numColors, label = "The Secret Code", selectedColor, clearSelection }) {
+  return (
+    <div>
+      <div className="section-label">{label}</div>
+      <div className="code-builder">
+        {code.map((c, i) => (
+          <Slot
+            key={i}
+            colorId={c}
+            active={true}
+            onDrop={(data) => {
+              if (data?.from === "palette") {
+                setCode((cur) => { const n = [...cur]; n[i] = data.color; return n; });
+              }
+            }}
+            onClick={() => {
+              if (selectedColor != null) {
+                setCode((cur) => { const n = [...cur]; n[i] = selectedColor; return n; });
+                clearSelection && clearSelection();
+              } else {
+                setCode((cur) => { const n = [...cur]; n[i] = null; return n; });
+              }
+            }}
+          />
+        ))}
+        {code.every(c => c != null) && (
+          <button
+            className="btn-text"
+            onClick={() => setCode(code.map(() => null))}
+            style={{ marginLeft: 12 }}
+          >
+            Clear ×
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InitialGuessesEditor({ guesses, setGuesses, pending, setPending, codeLength, numColors, code, maxAttempts, selectedColor, clearSelection }) {
+  const canAdd = pending.every(c => c != null) && guesses.length < maxAttempts - 1 && code.every(c => c != null);
+  return (
+    <div>
+      <div className="section-label">Initial moves played by you ({guesses.length})</div>
+      {guesses.length === 0 && (
+        <p className="howto" style={{ marginBottom: 14 }}>
+          Optional. Play a few attempts now so the solver picks up the board mid-game with the remaining tries.
+        </p>
+      )}
+      <div className="board" style={{ marginBottom: 14 }}>
+        {guesses.map((g, i) => {
+          const fb = evaluate(g.row, code);
+          return (
+            <div key={i} className="initial-row">
+              <div className="row-num">{String(i + 1).padStart(2, "0")}</div>
+              <div className="slots">
+                {g.row.map((c, j) => (
+                  <Slot key={j} colorId={c} active={false} />
+                ))}
+              </div>
+              <FeedbackPegs blacks={fb.blacks} whites={fb.whites} total={codeLength} />
+              <button className="remove" onClick={() => setGuesses(guesses.filter((_, k) => k !== i))} title="Remove">×</button>
+            </div>
+          );
+        })}
+
+        {/* Pending row */}
+        {guesses.length < maxAttempts - 1 && code.every(c => c != null) && (
+          <div className="initial-row" style={{ borderBottom: "1px solid var(--hairline-strong)" }}>
+            <div className="row-num">{String(guesses.length + 1).padStart(2, "0")}</div>
+            <div className="slots">
+              {pending.map((c, i) => (
+                <Slot
+                  key={i}
+                  colorId={c}
+                  active={true}
+                  onDrop={(data) => {
+                    if (data?.from === "palette") {
+                      setPending((cur) => { const n = [...cur]; n[i] = data.color; return n; });
+                    }
+                  }}
+                  onClick={() => {
+                    if (selectedColor != null) {
+                      setPending((cur) => { const n = [...cur]; n[i] = selectedColor; return n; });
+                      clearSelection && clearSelection();
+                    } else {
+                      setPending((cur) => { const n = [...cur]; n[i] = null; return n; });
+                    }
+                  }}
+                />
+              ))}
+            </div>
+            <FeedbackPegs blacks={0} whites={0} total={codeLength} />
+            <button
+              className="remove"
+              disabled={!canAdd}
+              onClick={() => {
+                setGuesses([...guesses, { row: [...pending] }]);
+                setPending(Array(codeLength).fill(null));
+              }}
+              title="Add move"
+              style={{ fontSize: 22, lineHeight: 1, color: canAdd ? "var(--ink)" : "var(--muted)" }}
+            >+</button>
+          </div>
+        )}
+      </div>
+
+      {!code.every(c => c != null) && (
+        <p className="howto" style={{ color: "var(--muted)" }}>
+          <em style={{ fontFamily: "'Instrument Serif', serif", fontStyle: "italic" }}>Set the secret code above first.</em>
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PublishedScreen({ id, settings, initialGuessCount }) {
+  const url = window.location.origin + window.location.pathname + "#/play/" + id;
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="published">
+      <h2>Published.</h2>
+      <p className="sub">Problem № {id} · {settings.codeLength}×{settings.numColors} · {settings.maxAttempts} attempts{initialGuessCount > 0 ? ` · ${initialGuessCount} initial ${initialGuessCount === 1 ? "move" : "moves"}` : ""}</p>
+      <div className="share-link">
+        <div className="url">{url}</div>
+        <button onClick={() => {
+          navigator.clipboard.writeText(url).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1800);
+          });
+        }}>{copied ? "Copied ✓" : "Copy link"}</button>
+      </div>
+      <div style={{ display: "flex", gap: 12, marginTop: 18, flexWrap: "wrap" }}>
+        <a className="btn btn-primary" href={"#/play/" + id} style={{ width: "auto", padding: "14px 22px" }}>
+          <span>Open problem</span><span className="arrow" style={{ marginLeft: 16 }}>→</span>
+        </a>
+        <a className="btn btn-ghost" href="#/create" style={{ width: "auto", padding: "14px 22px" }}
+           onClick={() => setTimeout(() => window.location.reload(), 50)}>
+          <span>Compose another</span><span className="arrow" style={{ marginLeft: 16 }}>+</span>
+        </a>
+        <a className="btn btn-ghost" href="#/browse" style={{ width: "auto", padding: "14px 22px" }}>
+          <span>To the archive</span><span className="arrow" style={{ marginLeft: 16 }}>→</span>
+        </a>
+      </div>
+    </div>
+  );
+}
+
+function CreatePage({ tweaks }) {
+  const [settings, setSettings] = useState({
+    codeLength: tweaks.codeLength,
+    numColors: tweaks.numColors,
+    allowDuplicates: tweaks.allowDuplicates,
+    maxAttempts: tweaks.maxAttempts,
+  });
+  const [code, setCode] = useState(() => Array(settings.codeLength).fill(null));
+  const [initialGuesses, setInitialGuesses] = useState([]);
+  const [pending, setPending] = useState(() => Array(settings.codeLength).fill(null));
+  const [title, setTitle] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState(null);
+  const [published, setPublished] = useState(null);
+  const [selectedColor, setSelectedColor] = useState(null);
+  const pickColor = (colorId) => setSelectedColor((s) => (s === colorId ? null : colorId));
+  const clearSelection = () => setSelectedColor(null);
+
+  // When code length changes, reset
+  useEffect(() => {
+    setCode(Array(settings.codeLength).fill(null));
+    setInitialGuesses([]);
+    setPending(Array(settings.codeLength).fill(null));
+  }, [settings.codeLength]);
+
+  const codeComplete = code.every(c => c != null);
+  const codeValid = codeComplete && code.every(c => c < settings.numColors)
+    && (settings.allowDuplicates || new Set(code).size === code.length);
+
+  async function publish() {
+    if (!codeValid) return;
+    setCreating(true); setError(null);
+    try {
+      const result = await api.createProblem({
+        code,
+        settings,
+        initialGuesses: initialGuesses.map(g => g.row),
+        title: title.trim() || null,
+      });
+      setPublished({ id: result.id, settings, initialGuessCount: initialGuesses.length });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  if (published) {
+    return <PublishedScreen {...published} />;
+  }
+
+  return (
+    <div className="create-grid">
+      <div>
+        <div className="create-section">
+          <h2>Settings</h2>
+          <p className="lede">Choose the rules of engagement. The solver will see exactly these parameters.</p>
+          <SettingsForm settings={settings} setSettings={setSettings} />
+        </div>
+
+        <div className="create-section">
+          <h2>The secret code</h2>
+          <p className="lede">Drag colours from the palette onto the {settings.codeLength} slots. Click a placed peg to remove it.</p>
+          <CodeBuilder code={code} setCode={setCode} numColors={settings.numColors} selectedColor={selectedColor} clearSelection={clearSelection} />
+          {codeComplete && !settings.allowDuplicates && new Set(code).size !== code.length && (
+            <p className="howto" style={{ color: "#B71D2C", marginTop: 10 }}>Duplicates are disabled — use distinct colours.</p>
+          )}
+        </div>
+
+        <div className="create-section">
+          <h2>Initial moves</h2>
+          <InitialGuessesEditor
+            guesses={initialGuesses}
+            setGuesses={setInitialGuesses}
+            pending={pending}
+            setPending={setPending}
+            codeLength={settings.codeLength}
+            numColors={settings.numColors}
+            code={code}
+            maxAttempts={settings.maxAttempts}
+            selectedColor={selectedColor}
+            clearSelection={clearSelection}
+          />
+        </div>
+
+        <div className="create-section">
+          <h2>Title</h2>
+          <p className="lede">Optional. A line for the archive.</p>
+          <div className="text-field" style={{ maxWidth: 480 }}>
+            <input
+              type="text"
+              placeholder="e.g. Monday morning warm-up"
+              value={title}
+              maxLength={80}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <aside className="side">
+        <Palette
+          numColors={settings.numColors}
+          compact={false}
+          onPick={pickColor}
+          selected={selectedColor}
+        />
+
+        <div className="card">
+          <div className="section-label">Publish</div>
+          <p className="howto" style={{ marginBottom: 14 }}>
+            The code is sent to the server and never exposed to solvers — only feedback is returned for each guess.
+          </p>
+          <div className="actions" style={{ marginTop: 0 }}>
+            <button
+              className="btn btn-primary"
+              disabled={!codeValid || creating}
+              onClick={publish}
+            >
+              <span>{creating ? "Publishing…" : "Publish problem"}</span>
+              <span className="arrow">→</span>
+            </button>
+            <a href="#/" className="btn btn-ghost">
+              <span>Cancel</span><span className="arrow">×</span>
+            </a>
+          </div>
+          {error && <p className="howto" style={{ color: "#B71D2C", marginTop: 14 }}>Error: {error}</p>}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function SettingsForm({ settings, setSettings }) {
+  function update(patch) { setSettings({ ...settings, ...patch }); }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 18 }}>
+      <div className="tweak-row" style={{ borderTop: "none", padding: 0 }}>
+        <span className="lbl">Code length</span>
+        <div className="seg">
+          {[4, 5, 6].map((v) => (
+            <button key={v} className={settings.codeLength === v ? "on" : ""} onClick={() => update({ codeLength: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+      <div className="tweak-row" style={{ borderTop: "none", padding: 0 }}>
+        <span className="lbl">Colours</span>
+        <div className="seg">
+          {[4, 5, 6].map((v) => (
+            <button key={v} className={settings.numColors === v ? "on" : ""} onClick={() => update({ numColors: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+      <div className="tweak-row" style={{ borderTop: "none", padding: 0 }}>
+        <span className="lbl">Attempts</span>
+        <div className="seg">
+          {[8, 10, 12].map((v) => (
+            <button key={v} className={settings.maxAttempts === v ? "on" : ""} onClick={() => update({ maxAttempts: v })}>{v}</button>
+          ))}
+        </div>
+      </div>
+      <div className="tweak-row" style={{ borderTop: "none", padding: 0 }}>
+        <span className="lbl">Duplicates</span>
+        <div className="seg">
+          <button className={settings.allowDuplicates ? "on" : ""} onClick={() => update({ allowDuplicates: true })}>allowed</button>
+          <button className={!settings.allowDuplicates ? "on" : ""} onClick={() => update({ allowDuplicates: false })}>unique</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// PLAY — solve a remote problem
+// ─────────────────────────────────────────────────────────────
+function PlayPage({ id }) {
+  const [problem, setProblem] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(null); setProblem(null);
+    api.getProblem(id)
+      .then((p) => { if (!cancelled) { setProblem(p); setLoading(false); } })
+      .catch((e) => { if (!cancelled) { setError(e); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [id]);
+
+  if (loading) {
+    return <div className="notice"><h2>Loading…</h2><p className="loading">Fetching problem {id}</p></div>;
+  }
+  if (error) {
+    if (error.code === 404) {
+      return (
+        <div className="notice">
+          <h2>No such problem.</h2>
+          <p>The id <strong style={{ color: "var(--ink)" }}>{id}</strong> didn't turn up in the archive.</p>
+          <div style={{ marginTop: 18 }}>
+            <a href="#/browse" className="btn btn-ghost" style={{ width: "auto", display: "inline-flex", padding: "12px 20px" }}>
+              <span>Browse archive</span><span className="arrow" style={{ marginLeft: 14 }}>→</span>
+            </a>
+          </div>
+        </div>
+      );
+    }
+    return <div className="notice"><h2>Error.</h2><p>{error.message}</p></div>;
+  }
+
+  const initial = (problem.initialGuesses || []).map((row, i) => ({
+    row, blacks: problem.initialFeedback[i].blacks, whites: problem.initialFeedback[i].whites,
+  }));
+
+  const remaining = problem.settings.maxAttempts - initial.length;
+
+  return (
+    <>
+      <p className="howto" style={{ marginTop: 12, marginBottom: 0 }}>
+        <strong style={{ color: "var(--ink)" }}>Problem № {problem.id}</strong>
+        {problem.title ? <> — <em style={{ fontFamily: "'Instrument Serif', serif", fontStyle: "italic", fontSize: 16 }}>{problem.title}</em></> : null}
+        {" "}— {remaining} {remaining === 1 ? "attempt" : "attempts"} remaining.
+      </p>
+      <Game
+        settings={problem.settings}
+        initialGuesses={initial}
+        checkGuess={(g) => api.checkGuess(id, g)}
+        revealCode={() => api.revealCode(id)}
+      />
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// BROWSE — list problems
+// ─────────────────────────────────────────────────────────────
+function BrowsePage() {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listProblems()
+      .then((r) => { if (!cancelled) setItems(r.problems || []); })
+      .catch((e) => { if (!cancelled) setError(e); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (error) return <div className="notice"><h2>Error.</h2><p>{error.message}</p></div>;
+  if (!items) return <div className="notice"><h2>Loading…</h2><p className="loading">Fetching archive</p></div>;
+
+  if (items.length === 0) {
+    return (
+      <div className="browse-list">
+        <div className="browse-empty">
+          <h3>The archive is empty.</h3>
+          <p>No published problems yet.</p>
+          <a href="#/create" className="btn btn-primary" style={{ width: "auto", display: "inline-flex", padding: "14px 22px" }}>
+            <span>Compose the first one</span><span className="arrow" style={{ marginLeft: 14 }}>→</span>
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="browse-list">
+      <p className="howto" style={{ marginBottom: 18 }}>
+        {items.length} {items.length === 1 ? "problem" : "problems"} in the archive.
+      </p>
+      {items.map((p) => {
+        const date = p.createdAt ? new Date(p.createdAt) : null;
+        const dateStr = date ? date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
+        return (
+          <a key={p.id} href={"#/play/" + p.id} className="problem-card">
+            <div className="pid">№ {p.id}</div>
+            <div className="info">
+              <div className={`title ${p.title ? "" : "empty"}`}>{p.title || "Untitled"}</div>
+              <div className="specs">
+                <span>{p.settings.codeLength} pegs</span>
+                <span className="sep">·</span>
+                <span>{p.settings.numColors} colours</span>
+                <span className="sep">·</span>
+                <span>{p.settings.maxAttempts - (p.initialGuesses?.length || 0)} / {p.settings.maxAttempts} attempts left</span>
+                <span className="sep">·</span>
+                <span>{dateStr}</span>
+              </div>
+            </div>
+            <div className="cta">
+              <span>Solve</span><span className="arrow">→</span>
+            </div>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shell + nav
+// ─────────────────────────────────────────────────────────────
+function ApiBadge() {
+  const [mode, setMode] = useState(api.mode);
+  useEffect(() => api.onChange(setMode), []);
+  const label = mode === "remote" ? "Live backend" : mode === "mock" ? "Local mock" : "Connecting…";
+  return (
+    <span className="api-status" title={mode === "mock" ? "No /api/* backend reachable — using localStorage mock." : ""}>
+      <span className={`api-dot ${mode}`}></span>{label}
+    </span>
+  );
+}
+
+function Nav({ route }) {
+  const items = [
+    { hash: "#/", name: "home", label: "Play" },
+    { hash: "#/create", name: "create", label: "Compose" },
+    { hash: "#/browse", name: "browse", label: "Archive" },
+  ];
+  return (
+    <nav className="nav">
+      {items.map((it, i) => (
+        <React.Fragment key={it.hash}>
+          <a href={it.hash} className={route.name === it.name || (it.name === "home" && route.name === "play") ? "on" : ""}>{it.label}</a>
+          {i < items.length - 1 && <span className="nav-dot">·</span>}
+        </React.Fragment>
+      ))}
+    </nav>
+  );
+}
+
+function Masthead({ route, status }) {
+  return (
+    <header className="masthead">
+      <div className="masthead-meta">
+        <span>Vol. I <span className="dot">·</span> No. 001</span>
+        <span>The Daily Cipher · MCMLXX</span>
+        <ApiBadge />
+      </div>
+      <a href="#/" style={{ display: "block" }}>
+        <h1 className={`masthead-title ${route.name !== "home" ? "compact" : ""}`}>Mastermind</h1>
+      </a>
+      <div className="masthead-sub">
+        <Nav route={route} />
+        <span style={{ textAlign: "right" }}>{status}</span>
+      </div>
+    </header>
+  );
+}
+
+function App() {
+  const route = useRoute();
+  const [tweaks, setTweak] = useTweaks();
+  const [tweaksOpen, setTweaksOpen] = useState(false);
+
+  // Tweaks protocol
+  useEffect(() => {
+    const handler = (e) => {
+      const t = e.data?.type;
+      if (t === "__activate_edit_mode") setTweaksOpen(true);
+      if (t === "__deactivate_edit_mode") setTweaksOpen(false);
+    };
+    window.addEventListener("message", handler);
+    try { window.parent.postMessage({ type: "__edit_mode_available" }, "*"); } catch {}
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  // Apply theme
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", tweaks.theme);
+  }, [tweaks.theme]);
+
+  // Status text per page
+  let status = "";
+  if (route.name === "home") status = "A puzzle a moment";
+  if (route.name === "create") status = "Compose a problem";
+  if (route.name === "play") status = "Solving № " + route.id;
+  if (route.name === "browse") status = "The archive";
+
+  let body;
+  if (route.name === "home") body = <HomePage tweaks={tweaks} />;
+  else if (route.name === "create") body = <CreatePage tweaks={tweaks} />;
+  else if (route.name === "play") body = <PlayPage id={route.id} />;
+  else if (route.name === "browse") body = <BrowsePage />;
+  else body = (
+    <div className="notice">
+      <h2>Page not found.</h2>
+      <p>The hash <code>{window.location.hash}</code> doesn't match a route.</p>
+    </div>
+  );
+
+  return (
+    <div className="page" data-screen-label={`${route.name === "home" ? "01" : route.name === "create" ? "02" : route.name === "play" ? "03" : "04"} Mastermind ${route.name}`}>
+      <Masthead route={route} status={status} />
+      {body}
+      <TweaksPanel
+        tweaks={tweaks}
+        setTweak={setTweak}
+        open={tweaksOpen}
+        onClose={() => {
+          setTweaksOpen(false);
+          try { window.parent.postMessage({ type: "__edit_mode_dismissed" }, "*"); } catch {}
+        }}
+      />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
