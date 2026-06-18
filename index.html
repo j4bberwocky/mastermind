@@ -231,6 +231,29 @@ const api = (() => {
       problems.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
       return { problems };
     },
+
+    async updateProblem(id, patch) {
+      const r = await tryFetch("/problems/" + encodeURIComponent(id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (r && r.ok) return r.json();
+      if (r && r.status === 404) { const e = new Error("not_found"); e.code = 404; throw e; }
+      if (r) throw new Error((await r.text()) || "Request failed");
+      // Mock mode: edit/delete are only supported with a live backend.
+      throw new Error("operazione non supportata in modalità locale");
+    },
+
+    async deleteProblem(id) {
+      const r = await tryFetch("/problems/" + encodeURIComponent(id), {
+        method: "DELETE",
+      });
+      if (r && r.status === 204) return;
+      if (r && r.status === 404) { const e = new Error("not_found"); e.code = 404; throw e; }
+      if (r) throw new Error((await r.text()) || "Request failed");
+      throw new Error("operazione non supportata in modalità locale");
+    },
   };
 })();
 
@@ -1111,6 +1134,12 @@ function PlayPage({ id }) {
 function BrowsePage() {
   const [items, setItems] = useState(null);
   const [error, setError] = useState(null);
+  const [editing, setEditing] = useState(null);              // { id, value } | null
+  const [confirmingDelete, setConfirmingDelete] = useState(null); // id | null
+  const [actionError, setActionError] = useState(null);
+  const [mode, setMode] = useState(api.mode);
+
+  useEffect(() => api.onChange(setMode), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1119,6 +1148,56 @@ function BrowsePage() {
       .catch((e) => { if (!cancelled) setError(e); });
     return () => { cancelled = true; };
   }, []);
+
+  // Esc closes the delete modal.
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const onKey = (e) => { if (e.key === "Escape") setConfirmingDelete(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmingDelete]);
+
+  const showActions = mode === "remote";
+
+  const startEditing = (id, title) => setEditing({ id, value: title || "" });
+  const cancelEditing = () => setEditing(null);
+  const commitEdit = async () => {
+    if (!editing) return;
+    const current = items.find(x => x.id === editing.id);
+    const newTitle = editing.value.trim();
+    const original = (current?.title || "").trim();
+    if (newTitle === original) { setEditing(null); return; }
+    try {
+      const updated = await api.updateProblem(editing.id, { title: newTitle || null });
+      setItems(items.map(x => x.id === editing.id ? { ...x, ...updated } : x));
+      setEditing(null);
+    } catch (e) {
+      if (e.code === 404) {
+        setItems(items.filter(x => x.id !== editing.id));
+        setActionError("Puzzle non trovato.");
+      } else {
+        setActionError(e.message || "Errore durante la rinomina.");
+      }
+      setEditing(null);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmingDelete) return;
+    const id = confirmingDelete;
+    setConfirmingDelete(null);
+    try {
+      await api.deleteProblem(id);
+      setItems(items.filter(x => x.id !== id));
+    } catch (e) {
+      if (e.code === 404) {
+        setItems(items.filter(x => x.id !== id));
+        setActionError("Puzzle già rimosso.");
+      } else {
+        setActionError(e.message || "Errore durante la cancellazione.");
+      }
+    }
+  };
 
   if (error) return <div className="notice"><h2>Error.</h2><p>{error.message}</p></div>;
   if (!items) return <div className="notice"><h2>Loading…</h2><p className="loading">Fetching archive</p></div>;
@@ -1139,17 +1218,57 @@ function BrowsePage() {
 
   return (
     <div className="browse-list">
+      {actionError && (
+        <p className="howto" style={{ color: "#B71D2C", marginBottom: 14 }}>
+          {actionError} <button className="btn-text" onClick={() => setActionError(null)}>chiudi ×</button>
+        </p>
+      )}
       <p className="howto" style={{ marginBottom: 18 }}>
         {items.length} {items.length === 1 ? "problem" : "problems"} in the archive.
       </p>
       {items.map((p) => {
         const date = p.createdAt ? new Date(p.createdAt) : null;
         const dateStr = date ? date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
+        const isEditing = editing && editing.id === p.id;
         return (
-          <a key={p.id} href={"#/play/" + p.id} className="problem-card">
+          <div
+            key={p.id}
+            className="problem-card"
+            role="link"
+            tabIndex={0}
+            onClick={(e) => {
+              if (isEditing) return;
+              if (e.target.closest(".problem-card-actions, input")) return;
+              navigate("#/play/" + p.id);
+            }}
+            onKeyDown={(e) => {
+              if (isEditing) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                navigate("#/play/" + p.id);
+              }
+            }}
+          >
             <div className="pid">№ {p.id}</div>
             <div className="info">
-              <div className={`title ${p.title ? "" : "empty"}`}>{p.title || "Untitled"}</div>
+              {isEditing ? (
+                <input
+                  className="title-edit"
+                  autoFocus
+                  type="text"
+                  maxLength={80}
+                  value={editing.value}
+                  onChange={(e) => setEditing({ ...editing, value: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+                    if (e.key === "Escape") { e.preventDefault(); cancelEditing(); }
+                  }}
+                  onBlur={() => commitEdit()}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <div className={`title ${p.title ? "" : "empty"}`}>{p.title || "Untitled"}</div>
+              )}
               <div className="specs">
                 <span>{p.settings.codeLength} pegs</span>
                 <span className="sep">·</span>
@@ -1160,12 +1279,52 @@ function BrowsePage() {
                 <span>{dateStr}</span>
               </div>
             </div>
-            <div className="cta">
-              <span>Solve</span><span className="arrow">→</span>
-            </div>
-          </a>
+            {showActions && !isEditing && (
+              <div className="problem-card-actions" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="icon-btn"
+                  title="Rinomina"
+                  aria-label="Rinomina"
+                  onClick={() => startEditing(p.id, p.title)}
+                >✎</button>
+                <button
+                  className="icon-btn danger"
+                  title="Cancella"
+                  aria-label="Cancella"
+                  onClick={() => setConfirmingDelete(p.id)}
+                >🗑</button>
+              </div>
+            )}
+            {!showActions && !isEditing && (
+              <div className="cta">
+                <span>Solve</span><span className="arrow">→</span>
+              </div>
+            )}
+          </div>
         );
       })}
+
+      {confirmingDelete && (
+        <div
+          className="confirm-modal-backdrop"
+          onClick={() => setConfirmingDelete(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Cancellare № {confirmingDelete}?</h3>
+            <p>L'operazione non può essere annullata.</p>
+            <div className="confirm-modal-actions">
+              <button className="btn btn-ghost" onClick={() => setConfirmingDelete(null)}>
+                <span>Annulla</span><span className="arrow">×</span>
+              </button>
+              <button className="btn btn-danger" onClick={confirmDelete}>
+                <span>Cancella</span><span className="arrow">🗑</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

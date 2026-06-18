@@ -23,7 +23,10 @@ L'API è documentata in [backend/README.md](backend/README.md).
 
 ## Prerequisiti
 
-- [Rust toolchain](https://rustup.rs/) (edition 2021, testato con stable).
+- [Rust toolchain](https://rustup.rs/) (edition 2021). `rustup` userà
+  automaticamente il canale e i componenti definiti in
+  [`backend/rust-toolchain.toml`](backend/rust-toolchain.toml) entrando
+  nella cartella.
 - Un browser moderno con connessione a internet **al primo caricamento** —
   React/Babel sono caricati da `unpkg.com` via CDN.
 
@@ -39,11 +42,12 @@ padre (`..`). Aprire `http://localhost:3000` nel browser.
 
 Variabili d'ambiente disponibili:
 
-| Var                     | Default | Significato                 |
-| ----------------------- | ------- | --------------------------- |
-| `PORT`                  | `3000`  | Porta TCP                   |
-| `MASTERMIND_STATIC_DIR` | `..`    | Directory servita sotto `/` |
-| `RUST_LOG`              | `info`  | Filtro `tracing`            |
+| Var                     | Default       | Significato                                     |
+| ----------------------- | ------------- | ----------------------------------------------- |
+| `PORT`                  | `3000`        | Porta TCP                                       |
+| `MASTERMIND_STATIC_DIR` | `..`          | Directory servita sotto `/`                     |
+| `MASTERMIND_DB_PATH`    | XDG data home | Path file SQLite (vedi `backend/README.md`)     |
+| `RUST_LOG`              | `info`        | Filtro `tracing`                                |
 
 ## Build di produzione
 
@@ -74,7 +78,6 @@ ID. Niente test end-to-end al momento.
 - **Babel a runtime nel browser**: ~2 MB di JS scaricati e trasformati a ogni
   caricamento. Va bene in LAN, ma una build statica con esbuild/Vite è in
   programma per ridurre il tempo di avvio sui tablet meno recenti.
-- **Niente persistenza**: lo store è in RAM, si svuota al riavvio del backend.
 - **Niente autenticazione**: l'endpoint `GET /api/problems/:id/code` rivela
   il codice a chiunque conosca l'ID. Accettabile in LAN famigliare, non in
   pubblico.
@@ -88,8 +91,8 @@ ID. Niente test end-to-end al momento.
 - [ ] Build statica del frontend (esbuild/Vite) — vendorare React/ReactDOM in
       `static/`, eliminare Babel runtime e le CDN `unpkg.com`. Senza questo,
       se il router di casa è offline la webapp non si avvia.
-- [ ] Persistenza su disco: scrivere lo store su `~/.local/share/mastermind/db.json`
-      a ogni mutazione, oppure passare a `rusqlite` con SQLite bundled.
+- [x] ~~Persistenza su disco~~ — fatto in `puzzle-lifecycle`: SQLite via
+      `rusqlite` bundled, path da `MASTERMIND_DB_PATH` o XDG data home.
 - [ ] Cross-compile per `aarch64-unknown-linux-gnu` (Pi 4/5) da macOS via
       [`cross`](https://github.com/cross-rs/cross).
 - [ ] Unit `systemd` per auto-start al boot e restart on crash.
@@ -100,15 +103,16 @@ ID. Niente test end-to-end al momento.
 
 ### Correttezza
 
-- [ ] Sostituire `std::sync::RwLock` con `tokio::sync::RwLock` o
-      `parking_lot::RwLock` — quello attuale blocca un worker Tokio sotto
-      contesa, e un panic in un handler avvelena il lock per tutti gli altri.
+- [x] ~~Sostituire `std::sync::RwLock`~~ — risolto in `puzzle-lifecycle`:
+      sostituito da `Arc<Mutex<rusqlite::Connection>>` (SQLite gestisce
+      internamente la concorrenza, niente lock poisoning sui worker Tokio).
 - [ ] Sistemare lo "swap" tra due slot in `handleDropToSlot` ([index.html](index.html))
       che sovrascrive il target senza liberare la sorgente.
-- [ ] Ordinamento stabile della lista problemi (oggi è ISO-8601 stringa: due
-      problemi creati nello stesso secondo escono in ordine non deterministico).
-- [ ] Validare lunghezza titolo lato server (frontend cappa a 80, backend
-      accetta qualsiasi cosa).
+- [x] ~~Ordinamento stabile della lista problemi~~ — risolto in
+      `puzzle-lifecycle`: ora `ORDER BY created_at DESC, id` lato SQL.
+- [x] ~~Validare lunghezza titolo lato server~~ — risolto in `puzzle-lifecycle`:
+      max 80 caratteri, validato in `create_problem` e `update_problem`,
+      più `CHECK` constraint nel DB come defense in depth.
 - [ ] Aggiungere array di dipendenze al `useEffect` dei keyboard shortcut
       ([index.html](index.html), `<Game>`) — oggi si ri-binda ad ogni render.
 - [ ] Re-probe del backend lato frontend: oggi se il backend torna su dopo
@@ -116,10 +120,11 @@ ID. Niente test end-to-end al momento.
 
 ### Pulizia
 
-- [ ] Rimuovere `ListResponse<'a>` mai usato in `backend/src/main.rs`.
-- [ ] Committare `backend/Cargo.lock` (per un binary crate va versionato).
-- [ ] Aggiungere un `.gitignore` alla root del repo (oggi `target/` non è
-      ignorata fuori da `backend/`).
+- [x] ~~Rimuovere `ListResponse<'a>`~~ — eliminato in `puzzle-lifecycle`.
+- [x] ~~Committare `backend/Cargo.lock`~~ — `backend/.gitignore` aggiornato
+      per non ignorare il lockfile (binary crate, build riproducibili).
+- [x] ~~Aggiungere un `.gitignore` alla root del repo~~ — file `.gitignore`
+      root presente, ignora `**/target/` e `.DS_Store`.
 - [ ] Verifica reale del touch su iPad/Android — finora testato solo via
       DevTools.
 

@@ -14,6 +14,9 @@
 //! same binary under `/`, so a single `cargo run` is enough to play in a
 //! browser without CORS gymnastics.
 
+mod storage;
+mod validity;
+
 use axum::{
     extract::{Path, State},
     http::{Method, StatusCode},
@@ -24,8 +27,7 @@ use axum::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower_http::{
@@ -83,19 +85,20 @@ struct CheckRequest {
     guess: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct PatchRequest {
+    #[serde(default)]
+    title: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct RevealResponse {
     code: Vec<u8>,
 }
 
-#[derive(Debug, Serialize)]
-struct ListResponse<'a> {
-    problems: Vec<&'a Problem>,
-}
-
 #[derive(Clone)]
 struct AppState {
-    problems: Arc<RwLock<HashMap<String, Problem>>>,
+    db: storage::Db,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -205,6 +208,7 @@ fn days_to_ymd(days_since_epoch: i64) -> (i32, u32, u32) {
 // Error helper
 // ──────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct AppError(StatusCode, String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -263,6 +267,24 @@ async fn create_problem(
         return Err(bad("an initial guess already solves the code"));
     }
 
+    // Information-theoretic feasibility check.
+    validity::validate_solvable(&req.settings, &req.initial_guesses, &initial_feedback)
+        .map_err(bad)?;
+
+    let title = match req.title {
+        Some(t) => {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                None
+            } else if trimmed.chars().count() > 80 {
+                return Err(bad("titolo troppo lungo (max 80 caratteri)"));
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => None,
+    };
+
     let id = gen_id();
     let problem = Problem {
         id: id.clone(),
@@ -271,34 +293,26 @@ async fn create_problem(
         initial_guesses: req.initial_guesses,
         initial_feedback,
         created_at: now_iso(),
-        title: req.title.and_then(|t| {
-            let t = t.trim();
-            if t.is_empty() { None } else { Some(t.to_string()) }
-        }),
+        title,
     };
 
-    state
-        .problems
-        .write()
-        .unwrap()
-        .insert(id.clone(), problem.clone());
+    state.db.insert(&problem)?;
     Ok(Json(problem))
 }
 
-async fn list_problems(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let guard = state.problems.read().unwrap();
-    let mut items: Vec<&Problem> = guard.values().collect();
-    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Json(serde_json::json!({ "problems": items }))
+async fn list_problems(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let items = state.db.list()?;
+    Ok(Json(serde_json::json!({ "problems": items })))
 }
 
 async fn get_problem(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Problem>, AppError> {
-    let guard = state.problems.read().unwrap();
-    let p = guard.get(&id).ok_or_else(not_found)?;
-    Ok(Json(p.clone()))
+    let p = state.db.get(&id)?.ok_or_else(not_found)?;
+    Ok(Json(p))
 }
 
 async fn check_guess(
@@ -306,8 +320,7 @@ async fn check_guess(
     Path(id): Path<String>,
     Json(req): Json<CheckRequest>,
 ) -> Result<Json<Feedback>, AppError> {
-    let guard = state.problems.read().unwrap();
-    let p = guard.get(&id).ok_or_else(not_found)?;
+    let p = state.db.get(&id)?.ok_or_else(not_found)?;
     validate_row(&req.guess, &p.settings).map_err(bad)?;
     Ok(Json(evaluate_guess(&req.guess, &p.code)))
 }
@@ -316,16 +329,61 @@ async fn reveal_code(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<RevealResponse>, AppError> {
-    let guard = state.problems.read().unwrap();
-    let p = guard.get(&id).ok_or_else(not_found)?;
-    Ok(Json(RevealResponse {
-        code: p.code.clone(),
-    }))
+    let p = state.db.get(&id)?.ok_or_else(not_found)?;
+    Ok(Json(RevealResponse { code: p.code }))
+}
+
+async fn update_problem(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PatchRequest>,
+) -> Result<Json<Problem>, AppError> {
+    if let Some(t) = req.title.as_ref() {
+        let trimmed = t.trim();
+        let normalized: Option<String> = if trimmed.is_empty() {
+            None
+        } else {
+            if trimmed.chars().count() > 80 {
+                return Err(bad("titolo troppo lungo (max 80 caratteri)"));
+            }
+            Some(trimmed.to_string())
+        };
+        let updated = state.db.update_title(&id, normalized.as_deref())?;
+        if !updated {
+            return Err(not_found());
+        }
+    } else if state.db.get(&id)?.is_none() {
+        // Empty PATCH body still requires the id to exist.
+        return Err(not_found());
+    }
+    let p = state.db.get(&id)?.ok_or_else(not_found)?;
+    Ok(Json(p))
+}
+
+async fn delete_problem(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !state.db.delete(&id)? {
+        return Err(not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ──────────────────────────────────────────────────────────────
 // Main
 // ──────────────────────────────────────────────────────────────
+
+fn default_db_path() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("mastermind").join("mastermind.db");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".local/share/mastermind/mastermind.db");
+    }
+    tracing::warn!("neither XDG_DATA_HOME nor HOME set; using ./mastermind.db");
+    PathBuf::from("./mastermind.db")
+}
 
 #[tokio::main]
 async fn main() {
@@ -336,9 +394,20 @@ async fn main() {
         )
         .init();
 
-    let state = AppState {
-        problems: Arc::new(RwLock::new(HashMap::new())),
+    let db_path = std::env::var("MASTERMIND_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_db_path());
+
+    let db = match storage::Db::open(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!("failed to open database at {}: {e}", db_path.display());
+            std::process::exit(1);
+        }
     };
+    tracing::info!("storage: {}", db.path().display());
+
+    let state = AppState { db };
 
     // Permissive CORS for development. Tighten for production.
     let cors = CorsLayer::new()
@@ -354,7 +423,10 @@ async fn main() {
 
     let api = Router::new()
         .route("/problems", post(create_problem).get(list_problems))
-        .route("/problems/:id", get(get_problem))
+        .route(
+            "/problems/:id",
+            get(get_problem).patch(update_problem).delete(delete_problem),
+        )
         .route("/problems/:id/check", post(check_guess))
         .route("/problems/:id/code", get(reveal_code))
         .with_state(state);
@@ -422,5 +494,132 @@ mod tests {
             assert_eq!(id.len(), 7);
             assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
         }
+    }
+
+    // ── Handler integration tests (in-memory DB) ──
+
+    fn make_state() -> AppState {
+        let db = storage::Db::open(std::path::Path::new(":memory:")).unwrap();
+        AppState { db }
+    }
+
+    fn classic_create(title: Option<&str>) -> CreateRequest {
+        CreateRequest {
+            code: vec![0, 1, 2, 3],
+            settings: Settings {
+                code_length: 4,
+                num_colors: 6,
+                allow_duplicates: true,
+                max_attempts: 10,
+            },
+            initial_guesses: vec![],
+            title: title.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_get_patch_delete_lifecycle() {
+        let state = make_state();
+        let created = create_problem(State(state.clone()), Json(classic_create(Some("Iniziale"))))
+            .await
+            .unwrap()
+            .0;
+        let id = created.id.clone();
+        assert_eq!(created.title.as_deref(), Some("Iniziale"));
+
+        // get
+        let got = get_problem(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(got.id, id);
+        assert_eq!(got.code, vec![0, 1, 2, 3]);
+
+        // patch title
+        let patched = update_problem(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(PatchRequest {
+                title: Some("Nuovo".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.title.as_deref(), Some("Nuovo"));
+
+        // delete
+        let resp = delete_problem(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp, StatusCode::NO_CONTENT);
+
+        // get returns 404
+        let err = get_problem(State(state), Path(id)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_overlong_title() {
+        let state = make_state();
+        let mut req = classic_create(None);
+        req.title = Some("x".repeat(81));
+        let err = create_problem(State(state), Json(req)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("80"), "expected mention of limit, got: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_infeasible_puzzle() {
+        let state = make_state();
+        let mut req = classic_create(None);
+        req.settings.max_attempts = 2; // 4×6 with 2 attempts → infeasible
+        let err = create_problem(State(state), Json(req)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("almeno"), "expected validity message, got: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn patch_unknown_id_is_404() {
+        let state = make_state();
+        let err = update_problem(
+            State(state),
+            Path("nope".to_string()),
+            Json(PatchRequest {
+                title: Some("x".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_id_is_404() {
+        let state = make_state();
+        let err = delete_problem(State(state), Path("nope".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_empty_title_clears_it() {
+        let state = make_state();
+        let created = create_problem(State(state.clone()), Json(classic_create(Some("ciao"))))
+            .await
+            .unwrap()
+            .0;
+        let patched = update_problem(
+            State(state),
+            Path(created.id),
+            Json(PatchRequest {
+                title: Some("   ".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.title, None);
     }
 }

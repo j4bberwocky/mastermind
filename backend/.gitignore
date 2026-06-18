@@ -1,2 +1,3 @@
+# Cargo.lock va committato: mastermind-backend è un'applicazione (binario),
+# quindi il lockfile garantisce build riproducibili.
 /target
-Cargo.lock

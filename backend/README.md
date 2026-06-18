@@ -17,11 +17,12 @@ By default the server listens on `http://0.0.0.0:3000` and serves:
 
 Override with environment variables:
 
-| Var                       | Default | Meaning                                   |
-|---------------------------|---------|-------------------------------------------|
-| `PORT`                    | `3000`  | TCP port to listen on                     |
-| `MASTERMIND_STATIC_DIR`   | `..`    | Directory served at `/` (the SPA)         |
-| `RUST_LOG`                | `info`  | tracing filter                            |
+| Var                     | Default       | Meaning                                                         |
+| ----------------------- | ------------- | --------------------------------------------------------------- |
+| `PORT`                  | `3000`        | TCP port to listen on                                           |
+| `MASTERMIND_STATIC_DIR` | `..`          | Directory served at `/` (the SPA)                               |
+| `MASTERMIND_DB_PATH`    | XDG data home | SQLite database file path (see Storage section)                 |
+| `RUST_LOG`              | `info`        | tracing filter                                                  |
 
 Open `http://localhost:3000/` in a browser. The masthead's status dot will
 flip from "Connecting…" (grey) to **"Live backend"** (green) once the SPA
@@ -61,7 +62,8 @@ Response (`200 OK`): the **public** view of the problem (no `code`).
 ```
 
 Errors: `400` on validation (bad colour, length mismatch, duplicates when
-forbidden, an initial guess that already solves the code, …).
+forbidden, an initial guess that already solves the code, title longer than
+80 chars, or puzzle informazione-teoricamente irrisolvibile nel caso peggiore).
 
 ### `GET /api/problems` — list
 
@@ -88,6 +90,28 @@ Response:
 The server is stateless about player progress — it just scores guesses
 against the stored code. The frontend tracks attempts.
 
+### `PATCH /api/problems/:id` — rename a puzzle
+
+Only the `title` is editable; `code`, `settings`, and `initialGuesses` are
+frozen at creation to avoid breaking solvers already mid-game.
+
+```json
+{ "title": "Pasqua 2026" }
+```
+
+- `title` is trimmed; empty or whitespace-only becomes `null`.
+- Max length 80 characters (enforced both at request layer and via DB CHECK).
+- `404` if id is unknown.
+
+Response (`200 OK`): the public view of the puzzle with the updated title.
+
+### `DELETE /api/problems/:id` — delete a puzzle
+
+Hard delete, no soft-delete or recovery.
+
+- `204 No Content` on success.
+- `404` if id is unknown.
+
 ### `GET /api/problems/:id/code` — reveal the code
 
 ```json
@@ -102,11 +126,28 @@ unfair-by-construction, you can:
 Both are intentionally left out — they're an exercise depending on how
 much you care about cheaters in an anonymous, link-shared game.
 
-## Persistence
+## Storage
 
-The store is an `Arc<RwLock<HashMap<String, Problem>>>` — restarting the
-binary wipes the archive. Swap for SQLite / Postgres when you outgrow
-that. The handlers don't change.
+Puzzles are persisted in a local SQLite file (`rusqlite` with `bundled`
+SQLite, no system dependency). Concurrency: a single shared
+`Arc<Mutex<Connection>>` — sufficient for LAN-scale traffic.
+
+**Default path** (in order of fallback):
+
+1. `MASTERMIND_DB_PATH` env var, if set
+2. `${XDG_DATA_HOME}/mastermind/mastermind.db`
+3. `${HOME}/.local/share/mastermind/mastermind.db`
+4. `./mastermind.db` (last resort, logged as a warning)
+
+The parent directory is created automatically. WAL journal is enabled at
+boot. Schema initialisation is idempotent (`CREATE TABLE IF NOT EXISTS`),
+no migration crate needed at this scale.
+
+**Backup**: just copy the `.db` file (with the binary stopped or via
+`sqlite3 mastermind.db ".backup '/tmp/mastermind.bak'"`).
+
+**Reset**: stop the binary and `rm mastermind.db*` (also deletes `-wal`/`-shm`
+files). The next start recreates a fresh schema.
 
 ## Build
 

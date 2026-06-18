@@ -1,0 +1,5 @@
+# Toolchain Rust fissata per rustup (Rust resta gestito da rustup, non da mise).
+# rustup installa/usa automaticamente questo canale entrando nella cartella.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

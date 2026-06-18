@@ -1,0 +1,10 @@
+# Artefatti di build Rust (anche annidati, es. backend/target)
+/target/
+**/target/
+
+# macOS
+.DS_Store
+
+# Cache di skill/commands del CLI Claude (per-machine, non da versionare)
+.claude/
+**/.claude/
