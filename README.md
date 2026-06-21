@@ -30,6 +30,25 @@ L'API è documentata in [backend/README.md](backend/README.md).
 - Un browser moderno con connessione a internet **al primo caricamento** —
   React/Babel sono caricati da `unpkg.com` via CDN.
 
+## Sviluppo con make
+
+Dalla **radice del repo** il [`Makefile`](Makefile) avvolge i comandi `cargo`
+(che girano in `backend/`). I comandi `cargo` descritti sotto restano validi;
+`make` è solo la scorciatoia:
+
+| Target | Cosa fa |
+| --- | --- |
+| `make run` | `cargo run` (dev): API + SPA su `http://localhost:3000` |
+| `make build` | `cargo build --release` (binario autosufficiente) |
+| `make test` | `cargo test` |
+| `make fmt` / `make fmt-check` | `cargo fmt` / `cargo fmt --check` |
+| `make clippy` | `cargo clippy --all-targets -- -D warnings` |
+| `make clean` | `cargo clean` |
+| `make` | `fmt-check clippy test`, il gate qualità (`make help` per l'elenco) |
+
+> La toolchain Rust resta gestita da **rustup** (vedi
+> [`backend/rust-toolchain.toml`](backend/rust-toolchain.toml)), non da mise.
+
 ## Build & run (sviluppo)
 
 ```bash
